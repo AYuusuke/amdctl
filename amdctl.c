@@ -172,6 +172,7 @@ void printCpuPstate(const unsigned char);
 void printNbStates();
 int getDec(const char *);
 void writeNbPst(const unsigned char system);
+void writeNbVid(const unsigned char system);
 void rwMsrReg(const uint32_t, const unsigned char);
 void rwPciReg(const char *, const uint32_t, const unsigned char);
 void updateBuffer(const char *, const int);
@@ -186,6 +187,7 @@ short getNbPStatesCount();
 short getNbPStateHigh();
 short getNbPStateLow();
 short getNbPStateCurrent();
+short getNbTransitionSourcesMask();
 void error(const char *);
 
 int main(const int argc, char **argv) {
@@ -386,8 +388,8 @@ void parseOpts(const int argc, char **argv) {
 				allowWrites = 1;
 				break;
 			case 'n': // Northbridge vid to set.
-				if (cpuFamily > AMD11H) {
-					error("Currently amdctl can only change the NB vid on 10h and 11h CPU's.");
+				if (cpuFamily > AMD16H) {
+					error("Currently amdctl can only change the NB vid on 10h to 16h CPU's.");
 				}
 				nbVid = atoi(optarg);
 				if (nbVid < 0 || nbVid > MAX_VID) {
@@ -491,10 +493,8 @@ void usage() {
 	printf("    -c    CPU core to work on.\n");
 	printf("    -p    CPU P-state to work on.\n");
 	printf("    -v    Set CPU voltage id (vid).\n");
-	if (cpuFamily == AMD10H || cpuFamily == AMD11H) {
-		printf("    -n    Set north bridge voltage id (vid).\n");
-	}
 	if (cpuFamily <= AMD16H) {
+		printf("    -n    Set north bridge voltage id (vid)%s.\n", cpuFamily >= AMD12H ? " for next NB P-State transition" : "");
 		printf("    -b    Set north bridge %s.\n", cpuFamily <= AMD11H ? "divisor id (NbDid)" : "P-State (NbPst)");
 	}
 	if (cpuFamily == AMD14H) {
@@ -546,8 +546,7 @@ void fieldDescriptions() {
 	printf("NbVid:       North bridge voltage ID.\n");
 	printf("NbVolt:      North bridge voltage, in millivolts.\n");
 	printf("NbPst:       North bridge P-State, lower number means higher performance.\n");
-	printf("               On 12h, 14h system-wide override is applied. CPU/GPU state is ignored.\n");
-	printf("               On 15h, 16h CPU/GPU state affect selection. Disable GPU DPM to increase CPU impact.\n");
+	printf("               GPU tends to overpower these. Disable GPU DPM for tighter control.\n");
 	printf("IddVal:      Core current (intensity) ID. Used to calculate cpu current draw and power draw.\n");
 	printf("IddDiv       Core current (intensity) dividor.\n");
 	printf("CpuCurr:     The cpu current draw, in amps.\n");
@@ -655,7 +654,7 @@ void wrCpuStates() {
 						updateBuffer(PSTATE_EN_BITS, togglePs);
 					}
 					if (nbVid > -1) {
-						updateBuffer(NB_VID_BITS, nbVid);
+						writeNbVid(0);
 					}
 					if (cpuVid > -1) {
 						updateBuffer(CPU_VID_BITS, cpuVid);
@@ -678,11 +677,9 @@ void wrCpuStates() {
 			}
 			if (pstate == -1) {
 				if (nbVid > -1) {
-					rwMsrReg(MSR_COFVID_CONTROL, 1);
-					updateBuffer(NB_VID_BITS, nbVid);
-					rwMsrReg(MSR_COFVID_CONTROL, 0);
+					writeNbVid(1);
 				}
-				if (nbPst > -1 && core + 1 == cores) {
+				if (nbPst > -1) {
 					writeNbPst(1);
 				}
 			}
@@ -756,50 +753,115 @@ short getNbPst(const unsigned char system) {
  * @param system ->  0: CPU PState, 1: whole system.
  */
 void writeNbPst(const unsigned char system) {
+	if (!system) {
+		switch(cpuFamily) {
+			case AMD10H:
+			case AMD11H:
+			case AMD15H:
+			case AMD16H:
+				updateBuffer(CPU_NBPST_BITS, nbPst);
+				break;
+			default:
+				break;
+		}
+		return;
+	}
 	switch(cpuFamily) {
 		case AMD10H:
 		case AMD11H:
-			if (system) {
-				rwMsrReg(MSR_NB_CFG, 1);
-				updateBuffer(GFX_NB_PSTATE_DIS_BITS, !nbPst);
-				rwMsrReg(MSR_NB_CFG, 0);
-				rwMsrReg(MSR_COFVID_CONTROL, 1);
-				updateBuffer(CPU_NBPST_BITS, nbPst);
-				rwMsrReg(MSR_COFVID_CONTROL, 0);
-			} else {
-				updateBuffer(CPU_NBPST_BITS, nbPst);
-			}
+			rwMsrReg(MSR_NB_CFG, 1);
+			updateBuffer(GFX_NB_PSTATE_DIS_BITS, !nbPst);
+			rwMsrReg(MSR_NB_CFG, 0);
+			rwMsrReg(MSR_COFVID_CONTROL, 1);
+			updateBuffer(CPU_NBPST_BITS, nbPst);
+			rwMsrReg(MSR_COFVID_CONTROL, 0);
 			break;
 		case AMD12H:
 		case AMD14H:
-			if (system) {
-				rwPciReg(ADDR_NB_PSTATE, REG_NB_PSTATE_CONFIG_LOW, 1);
-				updateBuffer(NB_PS_CTRL_DIS_BITS, 1);
-				updateBuffer(NB_PS_FORCE_SEL_BITS, nbPst);
-				updateBuffer(NB_PS_FORCE_REQ_BITS, 1);
-				rwPciReg(ADDR_NB_PSTATE, REG_NB_PSTATE_CONFIG_LOW, 0);
-			}
+			rwPciReg(ADDR_NB_PSTATE, REG_NB_PSTATE_CONFIG_LOW, 1);
+			updateBuffer(NB_PS_CTRL_DIS_BITS, 1);
+			updateBuffer(NB_PS_FORCE_SEL_BITS, nbPst);
+			updateBuffer(NB_PS_FORCE_REQ_BITS, 1);
+			rwPciReg(ADDR_NB_PSTATE, REG_NB_PSTATE_CONFIG_LOW, 0);
 			break;
 		case AMD15H:
 		case AMD16H:
-			if (system) {
-				if (canUnlockSmu) {
-					rwPciReg(ADDR_EXT_MEM_CONTR, REG_EXT_MEM_CONTR_CONFIG, 1);
-					if (getDec(SMU_CFG_LOCK_BITS)) {
-						updateBuffer(SMU_CFG_LOCK_BITS, 0);
-						rwPciReg(ADDR_EXT_MEM_CONTR, REG_EXT_MEM_CONTR_CONFIG, 0);
-					}
+			if (canUnlockSmu) {
+				rwPciReg(ADDR_EXT_MEM_CONTR, REG_EXT_MEM_CONTR_CONFIG, 1);
+				if (getDec(SMU_CFG_LOCK_BITS)) {
+					updateBuffer(SMU_CFG_LOCK_BITS, 0);
+					rwPciReg(ADDR_EXT_MEM_CONTR, REG_EXT_MEM_CONTR_CONFIG, 0);
 				}
-				rwPciReg(ADDR_NB_PSTATE, REG_NB_PSTATE_CONTROL, 1);
-				updateBuffer(NB_PSTATE_GNB_SLOW_DIS_BITS, 1);
-				updateBuffer(SW_NB_PSTATE_LO_DIS_BITS, !nbPst);
-				rwPciReg(ADDR_NB_PSTATE, REG_NB_PSTATE_CONTROL, 0);
-			} else {
-				updateBuffer(CPU_NBPST_BITS, nbPst);
 			}
+			rwPciReg(ADDR_NB_PSTATE, REG_NB_PSTATE_CONTROL, 1);
+			updateBuffer(NB_PSTATE_GNB_SLOW_DIS_BITS, 1);
+			updateBuffer(SW_NB_PSTATE_LO_DIS_BITS, !nbPst);
+			rwPciReg(ADDR_NB_PSTATE, REG_NB_PSTATE_CONTROL, 0);
 			break;
 		default:
 			break;
+	}
+}
+
+void writeNbVid(const unsigned char system) {
+	if (!system) {
+		switch(cpuFamily) {
+			case AMD10H:
+			case AMD11H:
+				updateBuffer(NB_VID_BITS, nbVid);
+				break;
+			default:
+				break;
+		}
+		return;
+	}
+	switch(cpuFamily) {
+		case AMD10H:
+		case AMD11H:
+		case AMD15H:
+		case AMD16H:
+			rwMsrReg(MSR_COFVID_CONTROL, 1);
+			updateBuffer(NB_VID_BITS, nbVid);
+			rwMsrReg(MSR_COFVID_CONTROL, 0);
+			break;
+		default:
+			break;
+	}
+	const int nbpstates = getNbPStatesCount(), high = getNbPStateHigh(), low = getNbPStateLow();
+	for (int nbpstate = 0; nbpstate < nbpstates; nbpstate++) {
+		if((nbPst == 0 && nbpstate != high) || (nbPst == 1 && nbpstate != low)) {
+			continue;
+		}
+		switch(cpuFamily) {
+			case AMD12H:
+			case AMD14H:
+				switch (nbpstate) {
+					case 0:
+						rwPciReg(ADDR_CLOCK_POWER_CONTROL, 0xdc, 1);
+						updateBuffer(NB_PS0_VID_BITS, nbVid);
+						rwPciReg(ADDR_CLOCK_POWER_CONTROL, 0xdc, 0);
+						break;
+					case 1:
+						rwPciReg(ADDR_NB_PSTATE, REG_NB_PSTATE_CONFIG_LOW, 1);
+						updateBuffer(NB_PS1_VID_BITS, nbVid);
+						rwPciReg(ADDR_NB_PSTATE, REG_NB_PSTATE_CONFIG_LOW, 0);
+						break;
+					default:
+						break;
+				}
+				break;
+			case AMD15H:
+			case AMD16H:
+				rwPciReg(ADDR_NB_PSTATE, REG_NB_PSTATE_BASE + (nbpstate << 2), 1);
+				updateBuffer(NB_VID60_BITS, nbVid & 0x7f);
+				if (nbpstates >= 4) {
+					updateBuffer(NB_VID7_BITS, nbVid >> 7);
+				}
+				rwPciReg(ADDR_NB_PSTATE, REG_NB_PSTATE_BASE + (nbpstate << 2), 0);
+				break;
+			default:
+				break;
+		}
 	}
 }
 
@@ -857,7 +919,7 @@ void printNbStates() {
 	if (quiet) {
 		return;
 	}
-	short nbvid = -1, nbfid = -1, nbdid = -1, nbvolt, nbiddval = -1, mempst = -1, nbpstates = getNbPStatesCount(), nbidddiv = -1, smucfglock = 0;
+	short nbvid = -1, nbfid = -1, nbdid = -1, nbvolt, nbiddval = -1, mempst = -1, nbpstates = getNbPStatesCount(), nbidddiv = -1, smucfglock = 0, trmask = getNbTransitionSourcesMask();
 	if (nbpstates <= 0) {
 		return;
 	}
@@ -869,11 +931,12 @@ void printNbStates() {
 		default:
 			break;
 	}
-	printf("\nNorthbridge: High %d ; Low %d ; Current %d%s\n NbPstate%s%s%s\n",
+	printf("\nNorthbridge: High %d ; Low %d ; Current %d (%s)%s\n NbPstate%s%s%s\n",
 		getNbPStateHigh(),
 		getNbPStateLow(),
 		getNbPStateCurrent(),
-		smucfglock ? " ; SMU configuration is locked" : "",
+		trmask ? (trmask & 2 ? "auto:CPU&GPU" : "auto:CPU") : "manual",
+		smucfglock ? " ; SMU lock" : "",
 		(cpuFamily >= AMD12H && cpuFamily <= AMD14H) ? " NclkDid" : " NbFid   NbDid",
 		" NbVid   NbFreq  NbVolt",
 		nbpstates >= 4 ? " NbIddVal NbIddDiv  NbCurr NbPower MemPst" : "");
@@ -1357,8 +1420,36 @@ short getNbPStateCurrent() {
 		case AMD14H:
 		case AMD15H:
 		case AMD16H:
-			rwPciReg(ADDR_NB_PSTATE, REG_NB_PSTATE_STATUS, 1);;
+			rwPciReg(ADDR_NB_PSTATE, REG_NB_PSTATE_STATUS, 1);
 			result = getDec(CUR_NB_PSTATE_BITS);
+			break;
+		default:
+			return -1;
+	}
+	buffer = temp;
+	return result;
+}
+
+short getNbTransitionSourcesMask() {
+	const uint64_t temp = buffer;
+	short result = -1;
+	switch (cpuFamily) {
+		case AMD10H:
+		case AMD11H:
+			core = 0;
+			rwMsrReg(MSR_NB_CFG, 1);
+			result = !getDec(GFX_NB_PSTATE_DIS_BITS);
+			break;
+		case AMD12H:
+		case AMD14H:
+			rwPciReg(ADDR_NB_PSTATE, REG_NB_PSTATE_CONFIG_LOW, 1);
+			result = !getDec(NB_PS_CTRL_DIS_BITS) ? 3 : 0;
+			break;
+		case AMD15H:
+		case AMD16H:
+			rwPciReg(ADDR_NB_PSTATE, REG_NB_PSTATE_CONTROL, 1);
+			result = !getDec(SW_NB_PSTATE_LO_DIS_BITS) ? 1 : 0;
+			result += !getDec(NB_PSTATE_GNB_SLOW_DIS_BITS) ? 2 : 0;
 			break;
 		default:
 			return -1;
